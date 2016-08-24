@@ -35,6 +35,9 @@ One onset is constructed 2-D vector like `[time, feature]`.
         parser.add_argument('-H', '--hop-size', dest='hop_size', default='256',
                             help="Hop size of STFT on ipnut STFT matrix")
 
+        parser.add_argument('-m', '--mean-frame_size', dest='mean_frame_size', default='30',
+                            help="Threshold value of feature to detect onset")
+
         parser.add_argument('-F', '--feature-threshold', dest='feature_threshold', default='1000',
                             help="Threshold value of feature to detect onset")
 
@@ -49,6 +52,9 @@ One onset is constructed 2-D vector like `[time, feature]`.
 
         self.framerate = int(args.framerate)
         self.hop_size = int(args.hop_size)
+        self.mean_frame_size = int(args.mean_frame_size)
+        self.mean_frame_prev_size = int(np.ceil((self.mean_frame_size - 1) / 2))
+        self.mean_frame_next_size = int(np.floor((self.mean_frame_size - 1) / 2))
         self.feature_threshold = float(args.feature_threshold)
         self.time_threshold = float(args.time_threshold)
 
@@ -63,35 +69,44 @@ One onset is constructed 2-D vector like `[time, feature]`.
             self.window_size = (stft_matrix.shape[0] - 1) * 2
             self.ms_per_frame = self.window_size / self.framerate * 1000 / stft_matrix.shape[1]
 
-
         # get power spectrogram from STFT matrix
-        p_spec = np.abs(stft_matrix) ** 2
+        spectrogram = np.abs(stft_matrix) ** 2
+
+        # merge old power spectrogram to calculate difference between full neighbored frames
+        if self.old_spectrogram is None:
+            self.old_spectrogram = np.empty((spectrogram.shape[0], 0))
+        merged_spectrogram = np.concatenate((self.old_spectrogram, spectrogram), 1)
+        self.old_spectrogram = merged_spectrogram[:, -1:]
 
         # calculate spectral flux from power spectrogram
-        spectral_flux = self._spectral_flux(p_spec)
+        tmp_spectral_flux = self._spectral_flux(merged_spectrogram)
 
-        # fold
-        _spectral_flux, threshold = self._threshold(spectral_flux, 20, 1.5)
+        # merge old spectral flux
+        if self.old_spectral_flux is None:
+            self.old_spectral_flux = np.empty(0)
+        merged_spectral_flux = np.concatenate((self.old_spectral_flux, tmp_spectral_flux), 0)
+        self.old_spectral_flux = merged_spectral_flux[-self.mean_frame_size + 1:]
+
+        # calcurate threshold from means of spectral flux
+        threshold = self._get_local_means(merged_spectral_flux, self.mean_frame_size, 1.5)
+
+        # thresholding spectral flux by means
+        spectral_flux = merged_spectral_flux[self.mean_frame_prev_size:
+                                             self.mean_frame_prev_size + len(threshold)]
+        filtered_flux = np.maximum(spectral_flux - threshold, 0)
 
         self.total_frame_count += stft_matrix.shape[1]
-        logger.debug(self.total_frame_count)
 
-        return _spectral_flux, threshold
+        # TODO: pick peak
+        return filtered_flux, threshold
 
     def _spectral_flux(self, spectrogram):
 
-        # 2. merge old power spectrogram to calculate difference between full neighbored frames
-        if self.old_spectrogram is None:
-            self.old_spectrogram = np.empty(0).reshape(spectrogram.shape[0], -1)
-
-        # frame_offset = self.old_spectrogram.shape[1] - 2
-        merged_spectrogram = np.concatenate((self.old_spectrogram, spectrogram), 1)
-        self.old_spectrogram = spectrogram[:, -1:]
-
-        # 3. get incremental power difference between previous frames
-        p_incremental_diff = np.maximum(merged_spectrogram[:, 1:] - merged_spectrogram[:, :-1], 0)
-
-        # 4. fold power difference by getting mean of each frequency bins
+        # get incremental power difference between previous frames
+        # and fold power difference by getting mean of each frequency bins
+        # TODO: add another flux like negative flux and difference flux
+        # TODO: parametrize norm order
+        p_incremental_diff = np.maximum(spectrogram[:, 1:] - spectrogram[:, :-1], 0)
         p_diff_means = np.mean(p_incremental_diff, 0)
 
         logger.info('calculated {}-spectral flux from {}-spectrogram'
@@ -99,16 +114,12 @@ One onset is constructed 2-D vector like `[time, feature]`.
 
         return p_diff_means
 
-    def _threshold(self, spectral_flux, threshold_frame_size, multiplier):
-        if self.old_spectral_flux is None:
-            self.old_spectral_flux = np.empty(0)
+    def _get_local_means(self, spectral_flux, mean_frame_size, multiplier):
+        threshold = (np.array([np.mean(spectral_flux[i:self.mean_frame_size + i])
+                               for i in range(len(spectral_flux) - mean_frame_size + 1)]) *
+                     multiplier)
 
-        merged_spectral_flux = np.concatenate((self.old_spectral_flux, spectral_flux), 0)
+        logger.info('calculated {}-mean of spectral flux in range of {} from {}-spectral flux'
+                    .format(threshold.shape, mean_frame_size, spectral_flux.shape))
 
-        threshold = np.array([multiplier * np.mean(merged_spectral_flux[i:i+threshold_frame_size])
-                              for i in range(len(merged_spectral_flux) - threshold_frame_size)])
-
-        self.old_spectral_flux = merged_spectral_flux[-threshold_frame_size:]
-
-        offset = threshold_frame_size // 2
-        return merged_spectral_flux[offset:offset + len(threshold)], threshold
+        return threshold
