@@ -35,20 +35,11 @@ One onset is constructed 2-D vector like `[time, feature]`.
         parser.add_argument('-H', '--hop-size', dest='hop_size', default='256',
                             help="Hop size of STFT on ipnut STFT matrix")
 
-        parser.add_argument('-f', '--feature', dest='feature', default='diff',
-                            help="""To use as feature value. Default is `diff`.
-Below values are available:
-
-  abs  : Power of spectrum for each frames
-  diff : Difference of power of spectrum for each neighored frames
-
-""")
-
-        parser.add_argument('-T', '--time-threshold', dest='time_threshold', default='1000',
-                            help="Threshold time to fold neigbored frames to detect onset")
-
         parser.add_argument('-F', '--feature-threshold', dest='feature_threshold', default='1000',
                             help="Threshold value of feature to detect onset")
+
+        parser.add_argument('-T', '--time-threshold', dest='time_threshold', default='100',
+                            help="Threshold time to fold neigbored frames to detect onset")
 
         args = parser.parse_args(argv)
 
@@ -56,11 +47,68 @@ Below values are available:
             logger.setLevel(DEBUG)
             logger.info('Start as verbose mode')
 
+        self.framerate = int(args.framerate)
         self.hop_size = int(args.hop_size)
-        self.prev_wave = np.empty(0)
+        self.feature_threshold = float(args.feature_threshold)
+        self.time_threshold = float(args.time_threshold)
 
-    def transform(self, wave):
+        self.old_spectrogram = None
+        self.old_spectral_flux = None
+        self.window_size = None
+        self.total_frame_count = 0
+        self.onset_seq = np.empty(0).reshape(-1, 2)
 
-        # TODO: implement
-        onsets = np.empty(0)
-        return onsets
+    def transform(self, stft_matrix):
+        if self.window_size is None:
+            self.window_size = (stft_matrix.shape[0] - 1) * 2
+            self.ms_per_frame = self.window_size / self.framerate * 1000 / stft_matrix.shape[1]
+
+
+        # get power spectrogram from STFT matrix
+        p_spec = np.abs(stft_matrix) ** 2
+
+        # calculate spectral flux from power spectrogram
+        spectral_flux = self._spectral_flux(p_spec)
+
+        # fold
+        _spectral_flux, threshold = self._threshold(spectral_flux, 20, 1.5)
+
+        self.total_frame_count += stft_matrix.shape[1]
+        logger.debug(self.total_frame_count)
+
+        return _spectral_flux, threshold
+
+    def _spectral_flux(self, spectrogram):
+
+        # 2. merge old power spectrogram to calculate difference between full neighbored frames
+        if self.old_spectrogram is None:
+            self.old_spectrogram = np.empty(0).reshape(spectrogram.shape[0], -1)
+
+        # frame_offset = self.old_spectrogram.shape[1] - 2
+        merged_spectrogram = np.concatenate((self.old_spectrogram, spectrogram), 1)
+        self.old_spectrogram = spectrogram[:, -1:]
+
+        # 3. get incremental power difference between previous frames
+        p_incremental_diff = np.maximum(merged_spectrogram[:, 1:] - merged_spectrogram[:, :-1], 0)
+
+        # 4. fold power difference by getting mean of each frequency bins
+        p_diff_means = np.mean(p_incremental_diff, 0)
+
+        logger.info('calculated {}-spectral flux from {}-spectrogram'
+                    .format(p_diff_means.shape, spectrogram.shape))
+
+        return p_diff_means
+
+    def _threshold(self, spectral_flux, threshold_frame_size, multiplier):
+        if self.old_spectral_flux is None:
+            self.old_spectral_flux = np.empty(0)
+
+        merged_spectral_flux = np.concatenate((self.old_spectral_flux, spectral_flux), 0)
+
+        threshold = np.array([multiplier * np.mean(merged_spectral_flux[i:i+threshold_frame_size])
+                              for i in range(len(merged_spectral_flux) - threshold_frame_size)])
+
+        self.old_spectral_flux = merged_spectral_flux[-threshold_frame_size:]
+
+        offset = threshold_frame_size // 2
+        return merged_spectral_flux[offset:offset + len(threshold)], threshold
