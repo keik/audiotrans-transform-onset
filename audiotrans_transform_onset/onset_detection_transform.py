@@ -2,6 +2,7 @@
 
 from argparse import ArgumentParser, RawTextHelpFormatter
 import numpy as np
+from scipy.ndimage import uniform_filter
 from logging import getLogger, StreamHandler, Formatter, DEBUG
 from audiotrans import Transform
 
@@ -13,7 +14,7 @@ logger.addHandler(handler)
 
 class OnsetDetectionTransform(Transform):
 
-    def __init__(self, argv=[]):
+    def __init__(self, argv=[], **kwargs):
         parser = ArgumentParser(
             prog='onset',
             description="""audiotrans transform module for onset detection.
@@ -35,8 +36,12 @@ One onset is constructed 2-D vector like `[time, feature]`.
         parser.add_argument('-H', '--hop-size', dest='hop_size', default='256',
                             help="Hop size of STFT on ipnut STFT matrix")
 
-        parser.add_argument('-m', '--mean-frame_size', dest='mean_frame_size', default='30',
+        parser.add_argument('-m', '--local-mean-time', dest='local_mean_time', default='200',
                             help="Threshold value of feature to detect onset")
+
+        parser.add_argument('-p', '--threshold-multiplier', dest='threshold_multiplier',
+                            default='1.5',
+                            help="Multiplier to local means to generate threshold function")
 
         parser.add_argument('-F', '--feature-threshold', dest='feature_threshold', default='1000',
                             help="Threshold value of feature to detect onset")
@@ -52,9 +57,10 @@ One onset is constructed 2-D vector like `[time, feature]`.
 
         self.framerate = int(args.framerate)
         self.hop_size = int(args.hop_size)
-        self.mean_frame_size = int(args.mean_frame_size)
-        self.mean_frame_prev_size = int(np.ceil((self.mean_frame_size - 1) / 2))
-        self.mean_frame_next_size = int(np.floor((self.mean_frame_size - 1) / 2))
+        self.ms_per_frame = self.hop_size / self.framerate * 1000
+        self.mean_frame_size = int(int(args.local_mean_time) / self.ms_per_frame)
+        self.mean_frame_half_size = int(np.ceil(self.mean_frame_size / 2))
+        self.threshold_multiplier = float(args.threshold_multiplier)
         self.feature_threshold = float(args.feature_threshold)
         self.time_threshold = float(args.time_threshold)
 
@@ -62,64 +68,58 @@ One onset is constructed 2-D vector like `[time, feature]`.
         self.old_spectral_flux = None
         self.window_size = None
         self.total_frame_count = 0
-        self.onset_seq = np.empty(0).reshape(-1, 2)
+        self.onset_seq = np.zeros(0).reshape(-1, 2)
+
+        self.__debug_point = kwargs.pop('debug_point', None)
 
     def transform(self, stft_matrix):
         if self.window_size is None:
             self.window_size = (stft_matrix.shape[0] - 1) * 2
-            self.ms_per_frame = self.window_size / self.framerate * 1000 / stft_matrix.shape[1]
 
         # get power spectrogram from STFT matrix
         spectrogram = np.abs(stft_matrix) ** 2
 
         # merge old power spectrogram to calculate difference between full neighbored frames
         if self.old_spectrogram is None:
-            self.old_spectrogram = np.empty((spectrogram.shape[0], 0))
+            self.old_spectrogram = np.zeros((spectrogram.shape[0], 0))
         merged_spectrogram = np.concatenate((self.old_spectrogram, spectrogram), 1)
         self.old_spectrogram = merged_spectrogram[:, -1:]
 
         # calculate spectral flux from power spectrogram
-        tmp_spectral_flux = self._spectral_flux(merged_spectrogram)
+        tmp_spectral_flux = get_spectral_flux(merged_spectrogram)
+
+        if self.__debug_point == 'flux':
+            return tmp_spectral_flux
 
         # merge old spectral flux
         if self.old_spectral_flux is None:
-            self.old_spectral_flux = np.empty(0)
+            self.old_spectral_flux = np.zeros(0)
         merged_spectral_flux = np.concatenate((self.old_spectral_flux, tmp_spectral_flux), 0)
         self.old_spectral_flux = merged_spectral_flux[-self.mean_frame_size + 1:]
 
         # calcurate threshold from means of spectral flux
-        threshold = self._get_local_means(merged_spectral_flux, self.mean_frame_size, 1.5)
+        s = -self.mean_frame_half_size - len(tmp_spectral_flux) + 1
+        e = -self.mean_frame_half_size + 1
+        threshold = (uniform_filter(merged_spectral_flux, self.mean_frame_size)[s:e] *
+                     self.threshold_multiplier)
 
         # thresholding spectral flux by means
-        spectral_flux = merged_spectral_flux[self.mean_frame_prev_size:
-                                             self.mean_frame_prev_size + len(threshold)]
+        spectral_flux = merged_spectral_flux[s:e]
         filtered_flux = np.maximum(spectral_flux - threshold, 0)
 
-        self.total_frame_count += stft_matrix.shape[1]
+        if self.__debug_point == 'thresholded':
+            return filtered_flux
 
         # TODO: pick peak
         return filtered_flux, threshold
 
-    def _spectral_flux(self, spectrogram):
 
-        # get incremental power difference between previous frames
-        # and fold power difference by getting mean of each frequency bins
-        # TODO: add another flux like negative flux and difference flux
-        # TODO: parametrize norm order
-        p_incremental_diff = np.maximum(spectrogram[:, 1:] - spectrogram[:, :-1], 0)
-        p_diff_means = np.mean(p_incremental_diff, 0)
+def get_spectral_flux(spectrogram):
+    # get incremental power difference between previous frames
+    # and fold power difference by getting mean of each frequency bins
+    # TODO: add another flux like negative flux and difference flux
+    # TODO: parametrize norm order
+    p_incremental_diff = np.maximum(spectrogram[:, 1:] - spectrogram[:, :-1], 0)
+    p_diff_means = np.mean(p_incremental_diff, 0)
 
-        logger.info('calculated {}-spectral flux from {}-spectrogram'
-                    .format(p_diff_means.shape, spectrogram.shape))
-
-        return p_diff_means
-
-    def _get_local_means(self, spectral_flux, mean_frame_size, multiplier):
-        threshold = (np.array([np.mean(spectral_flux[i:self.mean_frame_size + i])
-                               for i in range(len(spectral_flux) - mean_frame_size + 1)]) *
-                     multiplier)
-
-        logger.info('calculated {}-mean of spectral flux in range of {} from {}-spectral flux'
-                    .format(threshold.shape, mean_frame_size, spectral_flux.shape))
-
-        return threshold
+    return p_diff_means
