@@ -59,7 +59,9 @@ One onset is constructed 2-D vector like `[time, feature]`.
         self.hop_size = int(args.hop_size)
         self.ms_per_frame = self.hop_size / self.framerate * 1000
         self.mean_frame_size = int(int(args.local_mean_time) / self.ms_per_frame)
-        self.mean_frame_half_size = int(np.ceil(self.mean_frame_size / 2))
+        half = (self.mean_frame_size - 1) / 2
+        self.mean_frame_b_size = int(np.ceil(half))
+        self.mean_frame_f_size = int(np.floor(half))
         self.threshold_multiplier = float(args.threshold_multiplier)
         self.feature_threshold = float(args.feature_threshold)
         self.time_threshold = float(args.time_threshold)
@@ -87,6 +89,8 @@ One onset is constructed 2-D vector like `[time, feature]`.
 
         # calculate spectral flux from power spectrogram
         tmp_spectral_flux = get_spectral_flux(merged_spectrogram)
+        logger.info('transform from {}-spectrogram to temporary {}-spectral flux'
+                    .format(merged_spectrogram.shape, tmp_spectral_flux.shape))
 
         if self.__debug_point == 'flux':
             return tmp_spectral_flux
@@ -95,17 +99,22 @@ One onset is constructed 2-D vector like `[time, feature]`.
         if self.old_spectral_flux is None:
             self.old_spectral_flux = np.zeros(0)
         merged_spectral_flux = np.concatenate((self.old_spectral_flux, tmp_spectral_flux), 0)
-        self.old_spectral_flux = merged_spectral_flux[-self.mean_frame_size + 1:]
+        self.old_spectral_flux = merged_spectral_flux[-(self.mean_frame_f_size +
+                                                        self.mean_frame_b_size):]
 
         # calcurate threshold from means of spectral flux
-        s = -self.mean_frame_half_size - len(tmp_spectral_flux) + 1
-        e = -self.mean_frame_half_size + 1
+        s = -(self.mean_frame_f_size + len(tmp_spectral_flux))
+        e = -(self.mean_frame_f_size)
         threshold = (uniform_filter(merged_spectral_flux, self.mean_frame_size)[s:e] *
                      self.threshold_multiplier)
 
         # thresholding spectral flux by means
         spectral_flux = merged_spectral_flux[s:e]
         filtered_flux = np.maximum(spectral_flux - threshold, 0)
+
+        logger.info(('thresholded merged {}-spectral flux with local mean of ' +
+                    '{}-frames to {}-spectral flux')
+                    .format(merged_spectral_flux.shape, self.mean_frame_size, filtered_flux.shape))
 
         if self.__debug_point == 'thresholded':
             return filtered_flux
