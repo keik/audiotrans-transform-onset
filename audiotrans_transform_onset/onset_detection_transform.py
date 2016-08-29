@@ -14,7 +14,7 @@ logger.addHandler(handler)
 
 class OnsetDetectionTransform(Transform):
 
-    def __init__(self, argv=[], **kwargs):
+    def __init__(self, argv=[]):
         parser = ArgumentParser(
             prog='onset',
             description="""audiotrans transform module for onset detection.
