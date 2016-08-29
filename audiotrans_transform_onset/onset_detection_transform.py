@@ -36,24 +36,18 @@ One onset is constructed 2-D vector like `[time, feature]`.
         parser.add_argument('-H', '--hop-size', dest='hop_size', default='256',
                             help="Hop size of STFT on ipnut STFT matrix")
 
-        parser.add_argument('-m', '--local-mean-time', dest='local_mean_time', default='200',
-                            help="Threshold value of feature to detect onset")
-
-        parser.add_argument('-M', '--local-maximum-time', dest='local_maximum_time', default='200',
-                            help="Threshold value of feature to detect onset")
-
-        parser.add_argument('-d', '--decay_factor', dest='decay_factor', default='0.8',
+        parser.add_argument('-m', '--local-mean-time', dest='local_mean_time', default='150',
                             help="Threshold value of feature to detect onset")
 
         parser.add_argument('-p', '--local-mean-multiplier', dest='local_mean_multiplier',
                             default='1.5',
                             help="Multiplier to local means to generate threshold function")
 
-        parser.add_argument('-F', '--feature-threshold', dest='feature_threshold', default='1000',
+        parser.add_argument('-M', '--local-maximum-time', dest='local_maximum_time', default='60',
                             help="Threshold value of feature to detect onset")
 
-        parser.add_argument('-T', '--time-threshold', dest='time_threshold', default='100',
-                            help="Threshold time to fold neigbored frames to detect onset")
+        parser.add_argument('-d', '--decay_factor', dest='decay_factor', default='0.8',
+                            help="Threshold value of feature to detect onset")
 
         args = parser.parse_args(argv)
 
@@ -71,15 +65,12 @@ One onset is constructed 2-D vector like `[time, feature]`.
         self.next_cache_size = int(np.floor(half))
         self.local_mean_multiplier = float(args.local_mean_multiplier)
         self.decay_factor = float(args.decay_factor)
-        self.feature_threshold = float(args.feature_threshold)
-        self.time_threshold = float(args.time_threshold)
 
         self.old_spectrogram = None
         self.old_spectral_flux = None
         self.last_exponential_decay_threshold = np.empty(0)
         self.window_size = None
         self.total_frame_count = 0
-        self.onset_seq = np.zeros(0).reshape(-1, 2)
 
         self.__debug_point = kwargs.pop('debug_point', None)
 
@@ -111,62 +102,89 @@ One onset is constructed 2-D vector like `[time, feature]`.
         self.old_spectral_flux = merged_spectral_flux[-(self.next_cache_size +
                                                         self.back_cache_size):]
 
-        # calcurate threshold from means of spectral flux
+        # detect range of slice to be able to reconstruct flux and each thresholds
         s = -(self.next_cache_size + len(tmp_spectral_flux))
         e = -(self.next_cache_size)
 
+        # threshold 1: local mean
         local_mean_threshold = gen_local_mean_threshold(
             merged_spectral_flux,
             self.mean_frame_size,
             self.local_mean_multiplier)[s:e]
 
+        # threshold 2: local maximum
         local_maximum_threshold = gen_local_maximum_threshold(
             merged_spectral_flux,
             self.maximum_frame_size)[s:e]
 
+        # threshold 3: exponential decay
         exponential_decay_threshold = gen_exponential_decay_threshold(
             merged_spectral_flux[s:e],
             self.decay_factor,
             self.last_exponential_decay_threshold)
         self.last_exponential_decay_threshold = exponential_decay_threshold[-1:]
 
+        # slice spectral flux and apply each threshold functions
         spectral_flux = merged_spectral_flux[s:e]
-        filtered_flux = np.maximum(spectral_flux - local_mean_threshold, 0)
-
-        logger.info(('thresholded merged {}-spectral flux with local mean of ' +
-                    '{}-frames to {}-spectral flux')
-                    .format(merged_spectral_flux.shape, self.mean_frame_size, filtered_flux.shape))
 
         if self.__debug_point == 'thresholds':
-            return local_mean_threshold, local_maximum_threshold, exponential_decay_threshold
+            return (spectral_flux,
+                    local_mean_threshold,
+                    local_maximum_threshold,
+                    exponential_decay_threshold)
 
-        if self.__debug_point == 'thresholded':
-            return filtered_flux
+        is_onsets = ((spectral_flux - local_mean_threshold >= 0) *
+                     (spectral_flux - local_maximum_threshold >= 0) *
+                     (spectral_flux - exponential_decay_threshold >= 0))
 
-        # TODO: pick peak
-        return spectral_flux, local_mean_threshold, local_maximum_threshold
+        # calculate times of onsets occured
+        onsets = (np.where(is_onsets)[0] + self.total_frame_count) * self.ms_per_frame
+
+        if len(onsets) > 0:
+            logger.info('onsets were detected at [{}] (ms)'.format(onsets))
+
+        self.total_frame_count += spectral_flux.shape[0]
+
+        return onsets
 
 
 def get_spectral_flux(spectrogram):
     """
-    get incremental power difference between previous frames
-    and fold power difference by getting mean of each frequency bins
+    Returns positive spectral flux from spectrogram
     """
+
     p_incremental_diff = np.maximum(spectrogram[:, 1:] - spectrogram[:, :-1], 0)
     p_diff_means = np.mean(p_incremental_diff, 0)
 
     return p_diff_means
 
 
-def gen_local_mean_threshold(flux, local_frame_size, multiplier):
-    return uniform_filter(flux, local_frame_size) * multiplier
+def gen_local_mean_threshold(x, local_frame_size, multiplier):
+    """
+    Returns local mean of specified array data,
+    within specified range,
+    with multipled by specifiedmultiplier
+    """
+
+    return uniform_filter(x, local_frame_size) * multiplier
 
 
-def gen_local_maximum_threshold(flux, local_frame_size):
-    return maximum_filter(flux, local_frame_size)
+def gen_local_maximum_threshold(x, local_frame_size):
+    """
+    Returns local maximum of specified array data,
+    within specified range
+    """
+
+    return maximum_filter(x, local_frame_size)
 
 
 def gen_exponential_decay_threshold(x, decay_fact, acc=np.zeros(1)):
+    """
+    Returns array of exponential decay threshold.
+    If current value are greater than decayed value, then
+    the value are update with current value.
+    """
+
     if len(acc) == 0:
         acc = np.zeros(1)
     if len(x) == 0:
