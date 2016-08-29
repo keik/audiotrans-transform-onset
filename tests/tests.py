@@ -15,33 +15,6 @@ def test_accept_arg_of_verbose():
     OnsetDetectionTransform(['-v'])  # no error would be raised
 
 
-def test_generated_flux_should_be_same_with_on_batch():
-    w = wave.open('tests/fixture/drums+bass.wav')
-    x = np.fromstring(w.readframes(w.getnframes()), np.int16)
-
-    # exercise on batch
-    stft_tr = STFTTransform()
-    stft_matrix = np.zeros((513, 0))
-    for i in range(0, len(x), 1024):
-        tmp_stft_matrix = stft_tr.transform(x[i:i+1024])
-        stft_matrix = np.concatenate((stft_matrix, tmp_stft_matrix), 1)
-    spectrogram = np.abs(stft_matrix) ** 2
-    flux_on_batch = get_spectral_flux(spectrogram)
-
-    # exercise on stream
-    stft_tr = STFTTransform()
-    onset_tr = OnsetDetectionTransform(**{'debug_point': 'flux'})
-    result = np.zeros(0)
-    for i in range(0, len(x), 1024):
-        tmp_stft_matrix = stft_tr.transform(x[i:i+1024])
-        tmp_flux = onset_tr.transform(tmp_stft_matrix)
-        result = np.append(result, tmp_flux)
-
-    # verify
-    assert np.allclose(result, flux_on_batch), \
-        "same results between batch and transform"
-
-
 @pytest.mark.parametrize('buf_size,'
                          'local_mean_time,'
                          'local_maximum_time',
@@ -57,12 +30,13 @@ def test_generated_flux_should_be_same_with_on_batch():
 def test_generated_thresholdeds_should_be_same_with_on_batch(buf_size,
                                                              local_mean_time,
                                                              local_maximum_time):
-    mspf = 256 / 44100 * 1000
-    local_mean_frame = int(local_mean_time / mspf)
-    local_maximum_frame = int(local_maximum_time / mspf)
-
     w = wave.open('tests/fixture/drums+bass.wav')
     x = np.fromstring(w.readframes(w.getnframes()), np.int16)
+
+    framerate = w.getframerate()
+    mspf = 256 / framerate * 1000
+    local_mean_frame = int(local_mean_time / mspf)
+    local_maximum_frame = int(local_maximum_time / mspf)
 
     # exercise on batch
     stft_tr = STFTTransform()
@@ -78,9 +52,9 @@ def test_generated_thresholdeds_should_be_same_with_on_batch(buf_size,
 
     # exercise on stream
     stft_tr = STFTTransform()
-    onset_tr = OnsetDetectionTransform('-p 1.5 -m {} -M {} -d 0.8'
-                                       .format(local_mean_time, local_maximum_time).split(),
-                                       **{'debug_point': 'thresholds'})
+    onset_tr = OnsetDetectionTransform('-r {} -p 1.5 -m {} -M {} -d 0.8 -D'
+                                       .format(framerate, local_mean_time, local_maximum_time)
+                                       .split())
 
     spectral_flux = np.zeros(0)
     local_mean_threshold = np.zeros(0)

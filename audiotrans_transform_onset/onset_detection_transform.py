@@ -19,15 +19,13 @@ class OnsetDetectionTransform(Transform):
             prog='onset',
             description="""audiotrans transform module for onset detection.
 
-Transform from STFT matrix to list of onsets.
-One onset is constructed 2-D vector like `[time, feature]`.
+Transform from STFT matrix to list of times of onset,
+or spectral flux with each thresholds for debug.
 
-`time` is millisecond of onset detected position.
-`feature` is value of feature which be able to specify by `--feature` option.""",
+Returned times of onset is in millisecond of onset detected position.""",
             formatter_class=RawTextHelpFormatter)
 
-        parser.add_argument('-v', '--verbose', dest='verbose',
-                            action='store_true',
+        parser.add_argument('-v', '--verbose', dest='verbose', action='store_true',
                             help='Run as verbose mode')
 
         parser.add_argument('-r', '--framerate', dest='framerate', default='44100',
@@ -46,8 +44,12 @@ One onset is constructed 2-D vector like `[time, feature]`.
         parser.add_argument('-M', '--local-maximum-time', dest='local_maximum_time', default='60',
                             help="Threshold value of feature to detect onset")
 
-        parser.add_argument('-d', '--decay_factor', dest='decay_factor', default='0.8',
+        parser.add_argument('-d', '--decay-factor', dest='decay_factor', default='0.8',
                             help="Threshold value of feature to detect onset")
+
+        parser.add_argument('-D', '--debug', dest='debug', action='store_true',
+                            help="Transform to spectral flux and each thresholds "
+                            "instead of times of onsets")
 
         args = parser.parse_args(argv)
 
@@ -72,7 +74,7 @@ One onset is constructed 2-D vector like `[time, feature]`.
         self.window_size = None
         self.total_frame_count = 0
 
-        self.__debug_point = kwargs.pop('debug_point', None)
+        self.debug = args.debug
 
     def transform(self, stft_matrix):
         if self.window_size is None:
@@ -91,9 +93,6 @@ One onset is constructed 2-D vector like `[time, feature]`.
         tmp_spectral_flux = get_spectral_flux(merged_spectrogram)
         logger.info('transform from {}-spectrogram to temporary {}-spectral flux'
                     .format(merged_spectrogram.shape, tmp_spectral_flux.shape))
-
-        if self.__debug_point == 'flux':
-            return tmp_spectral_flux
 
         # merge old spectral flux
         if self.old_spectral_flux is None:
@@ -127,7 +126,7 @@ One onset is constructed 2-D vector like `[time, feature]`.
         # slice spectral flux and apply each threshold functions
         spectral_flux = merged_spectral_flux[s:e]
 
-        if self.__debug_point == 'thresholds':
+        if self.debug:
             return (spectral_flux,
                     local_mean_threshold,
                     local_maximum_threshold,
